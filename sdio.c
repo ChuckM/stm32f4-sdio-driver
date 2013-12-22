@@ -695,9 +695,12 @@ sdio_status(SDIO_CARD c) {
                     do {
                         tmp_reg = SDIO_STA;
                         if (tmp_reg & SDIO_STA_RXDAVL) {
-                            data_buf[data_len++] = SDIO_FIFO;
+                            data_buf[data_len] = SDIO_FIFO;
+                            if (data_len < 128) {
+                                ++data_len;
+                            }
                         }
-                    } while ((tmp_reg & SDIO_STA_RXDAVL) && (data_len < 16));
+                    } while (tmp_reg & SDIO_STA_RXACT);
                     if ((tmp_reg & SDIO_STA_DBCKEND) == 0) {
                         if (tmp_reg & SDIO_STA_DCRCFAIL) {
                             err = SDIO_EDCRCFAIL;
