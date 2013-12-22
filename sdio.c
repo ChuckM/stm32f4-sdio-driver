@@ -601,6 +601,71 @@ sdio_readblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
 }
 
 /*
+ * Write a Block from our Card
+ */
+int
+sdio_writeblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
+    int err;
+    uint32_t tmp_reg;
+    uint32_t addr = lba;
+    uint8_t *t;
+    int ndx;
+
+    if (! SDIO_CARD_CCS(c)) {
+        addr = lba * 512; // non HC cards use byte address
+    }
+    
+    /*
+     * Copy buffer to our word aligned buffer. Nominally you
+     * can just use the passed in buffer and cast it to a
+     * uint32_t * but that can cause issues if it isn't 
+     * aligned.
+     */
+    t = (uint8_t *)(data_buf);
+    for (ndx = 0; ndx < 512; ndx ++) {
+        *t = *buf;
+        buf++;
+        t++;
+    }
+    err = sdio_select(c->rca);
+    if (! err) {
+        /* Set Block Size to 512 */
+        err = sdio_command(16, 512);
+        if (!err) {
+            SDIO_DTIMER = 0xffffffff;
+            SDIO_DLEN = 512;
+            SDIO_DCTRL = SDIO_DCTRL_DBLOCKSIZE_9 |
+                         SDIO_DCTRL_DTEN;
+            err = sdio_command(24, addr);
+            if (! err) {
+                data_len = 0;
+                do {
+                    tmp_reg = SDIO_STA;
+                    if (tmp_reg & SDIO_STA_TXFIFOHE) {
+                        SDIO_FIFO = data_buf[data_len];
+                        if (data_len < 128) {
+                            ++data_len;
+                        }
+                    }
+                } while (tmp_reg & SDIO_STA_TXACT);
+                if ((tmp_reg & SDIO_STA_DBCKEND) == 0) {
+                    if (tmp_reg & SDIO_STA_DCRCFAIL) {
+                        err = SDIO_EDCRCFAIL;
+                    } else if (tmp_reg & SDIO_STA_TXUNDERR) {
+                        err = SDIO_ETXUNDER;
+                    } else {
+                        err = SDIO_EUNKNOWN; // Unknown Error!
+                    }
+                }
+            }
+        }
+    }
+    // deselect the card
+    (void) sdio_select(0);
+    return err;
+}
+
+/*
  * sdio-status - Get Card Status page
  *
  * This function fetches the SD Card Status page and

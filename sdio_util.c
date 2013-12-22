@@ -10,12 +10,13 @@
 #include <libopencm3/stm32/rcc.h>
 #include <libopencm3/stm32/sdio.h>
 #include <libopencm3/stm32/gpio.h>
-#include "sdio.h"
+#include "bb.h"
 #include "debug.h"
 #ifndef NULL
 #define NULL (void *)(0)
 #endif
 
+#define USE_NEW_SDIO
 /* conveniently swaps the bytes in a long around */
 #define byte_swap(val) \
         asm("rev %[swap], %[swap]" : [swap] "=r" (val) : "0" (val));
@@ -38,21 +39,30 @@ void show_sdio_scr(int row, int col, uint32_t scr);
 
 /* these are the actually useful functions */
 void debug_status(uint32_t);
-int sdio_sendcommand(uint8_t, uint8_t, uint32_t);
 static void en_dis(char *, uint32_t, char *, char *);
 void sdio_log(uint8_t cmd, uint32_t arg, int err, const char *resp);
-int sd_enable4bit(int rca);
-int sd_readblock(int rca, int blk, uint32_t *buf);
-int sd_writeblock(int rca, int blk, uint32_t *buf);
-int sd_select(int rca);
-int sd_initialize(void);
-int sdio_error(uint8_t, uint32_t);
-int sdio_getscr(int rca);
 int sd_getsdstatus(int rca);
-const char *sdio_resp_error_msg(uint8_t cmd, uint32_t resp);
-void sdio_isr(void);
 
 char debug_buf[64];
+
+/*
+ * Capabilities of the card we've detected
+ */
+struct sd_caps {
+    int valid;      // Set 1 when structure is valid
+    int f8_support; // Supports CMD8
+    int sdio;       // Is SDIO Card
+    int v2;         // V2.x
+    int lv;         // Low Voltage (1.8V) card
+    int ok_volts;   // Voltage compatible with host
+    int hc;         // High capacity
+    uint16_t rca;   // Relative Card Address
+    uint32_t cid[4];    // CID values
+    uint32_t csd[4];    // CSD values
+    uint32_t size;      // Size in K Bytes of our SD Card
+    uint32_t blocks;    // Size in blocks of our SD Card
+    uint32_t scr;       // lower 32 of SCR
+} card_caps;
 
 struct form_data {
     int nflags;
@@ -89,7 +99,7 @@ en_dis(char *tag, uint32_t bits, char *en, char *ds) {
 }
 
 
-uint32_t blk_read_buf[1024];
+uint8_t blk_read_buf[512];
 
 
 /*
@@ -137,6 +147,7 @@ show_sdio_clock(int row, int col) {
     }
 }
 
+
 const struct {
     uint32_t bit;
     const char *msg;
@@ -168,6 +179,31 @@ const struct {
     { 0, 0 }
 };
 
+
+
+void
+show_sdio_status(int row, int col) {
+    uint32_t reg = SDIO_STA;
+    int ndx = 0;
+    int i = 0;
+    move_cursor(console, row, col+2);
+    text_color(console, YELLOW);
+    uart_puts(console, "SDIO Status Register : ");
+    text_color(console, DEFAULT);
+    if (reg == 0) {
+        uart_puts(console, "No Status Active!");
+    } else {
+        while (status_flags[ndx].msg != 0) {
+            if (reg & status_flags[ndx].bit) {
+                uart_puts(console, status_flags[ndx].msg);
+                move_cursor(console, row+i, col+23);
+                i++;
+            }
+            ndx++;
+        }
+    }
+}
+
 void
 debug_status(uint32_t bits) {
     uint32_t reg = bits;
@@ -187,6 +223,34 @@ debug_status(uint32_t bits) {
             }
             ndx++;
         }
+    }
+}
+
+void show_sdio_response(int, int);
+
+/* XXX the response registers should be an array */
+void
+show_sdio_response(int row, int col) {
+    uint32_t resp[4];
+    char buf[16];
+    int i;
+    resp[0] = SDIO_RESP1;
+    resp[1] = SDIO_RESP2;
+    resp[2] = SDIO_RESP3;
+    resp[3] = SDIO_RESP4;
+    move_cursor(console, row, col+9);
+    text_color(console, YELLOW);
+    uart_puts(console, "SDIO Response : ");
+    text_color(console, DEFAULT);
+    ntoa(resp[0], FMT_HEX_LONG | FMT_ALTERNATE_FORM, buf);
+    uart_puts(console, buf);
+    text_color(console, YELLOW);
+    uart_puts(console, " <- [SHORT] ");
+    text_color(console, DEFAULT);
+    for (i = 1; i < 4; i++) {
+        move_cursor(console, row + i, col + 25);
+        ntoa(resp[i], FMT_HEX_LONG | FMT_ALTERNATE_FORM, buf);
+        uart_puts(console, buf);
     }
 }
 
@@ -241,6 +305,7 @@ static const struct {
         { 0, 0},   // must be last
 };
 
+#if 0
 
 /*
  * Return an appropriate error message based on an R1 response
@@ -263,6 +328,7 @@ sdio_resp_error_msg(uint8_t cmd, uint32_t resp) {
     }
     return sdio_error_strings[5]; // Did not recognize the error bit
 }
+#endif
 
 void
 show_sdio_power(int row, int col) {
@@ -304,7 +370,10 @@ show_sdio_carddetect(int row, int col) {
     text_color(console, DEFAULT);
 }
 
+uint8_t blk_write_buf[512];
+
 SDIO_CARD my_card;
+
 
 /*
  * SDIO Explorer
@@ -314,9 +383,11 @@ SDIO_CARD my_card;
  */
 void
 sdio_explorer(void) {
-    int err;
+    int err, i;
     char c;
-    int ndx;
+    uint8_t *ss, *ds;
+    uint32_t blk;
+    uint8_t *addr;
 
     clear_screen(console);
     my_card = sdio_open();
@@ -337,16 +408,18 @@ sdio_explorer(void) {
     DEBUG("K bytes)\n");
     debug_wait();
     DEBUG("Reading a block from the card\n");
-    err = sdio_readblock(my_card, 0, (uint8_t *)blk_read_buf);
+    err = sdio_readblock(my_card, 0, blk_read_buf);
     if (! err) {
         DEBUG("Success!\n");
-        debug_page(debug_page((uint32_t)blk_read_buf));
+        addr = dump_page(debug_console, blk_read_buf);
+        dump_page(debug_console, addr);
     }
     DEBUG("Try reading the next block too.\n");
-    err = sdio_readblock(my_card, 1, (uint8_t *)blk_read_buf);
+    err = sdio_readblock(my_card, 1, blk_read_buf);
     if (! err) {
         DEBUG("Success!\n");
-        debug_page(debug_page((uint32_t)blk_read_buf));
+        addr = dump_page(debug_console, blk_read_buf);
+        dump_page(debug_console, addr);
     }
 
     show_sdio_power(1, 40);
@@ -356,8 +429,49 @@ sdio_explorer(void) {
     show_sdio_cid(3, 32, my_card->cid);
     show_sdio_scr(32, 42, my_card->scr[0]);
     move_cursor(console, 45, 1);
-    debug_wait();
-    return;
+    while (1) {
+        move_cursor(console, 11, 1);
+        uart_puts(console, "Read/Write/eXit? [Read]");
+        c = uart_getc(console, 1);
+        if ((c == 'x') || (c == 'X')) {
+            return;
+        }
+        if ((c == 'r') || (c == 'R')) {
+            move_cursor(console, 12, 1);
+            uart_puts(console, "Enter Block # :               ");
+            blk = uart_getnum(console);
+            if (blk >= my_card->size) {
+                move_cursor(console, 13, 1);
+                uart_puts(console, "Block number out of range!");
+                continue;
+            }
+            err = sdio_readblock(my_card, blk, blk_read_buf);
+            move_cursor(console, 13, 1);
+            uart_puts(console, "Result : ");
+            uart_puts(console, sdio_errmsg(err));
+            move_cursor(console, 15, 1);
+            addr = dump_page(console, blk_read_buf);
+            dump_page(console, addr);
+        } else if ((c == 'w') || (c == 'W')) {
+            move_cursor(console, 12, 1);
+            uart_puts(console, "Enter Block # :               ");
+            blk = uart_getnum(console);
+            for (i = 0; i < 512; i++) {
+                *(blk_read_buf+i) = i & 0xff;
+            }
+            ss = (uint8_t *) "This is Block # ";
+            ds = blk_read_buf;
+            while (*ss != '\000') {
+                *ds = *ss;
+                ds++; ss++;
+            }
+            ntoa(blk, FMT_BASE_10, (char *) ds);
+            err = sdio_writeblock(my_card, blk, blk_read_buf);
+            move_cursor(console, 13, 1);
+            uart_puts(console, "Result : ");
+            uart_puts(console, sdio_errmsg(err));
+        }
+    }
 }
 
 /*
@@ -905,6 +1019,61 @@ show_sdio_scr(int row, int col, uint32_t scr) {
         uart_puts(console, "None");
     }
 }
+
+#if 0
+
+/* XXX Move this over to sdio */
+int
+sd_getsdstatus(int rca) {
+    int err;
+    int i, ndx;
+    uint32_t tmp_reg;
+    uint32_t buf[32];
+
+    err = sd_select(rca);
+    if (err) {
+        return err;
+    }
+    err = sdio_sendcommand(16, SDIO_SHORT_RESPONSE, 64);
+    if (err) {
+        return err;
+    }
+    err = sdio_sendcommand(55, SDIO_SHORT_RESPONSE, rca << 16);
+    if (err) {
+        return err;
+    }
+    /* setup DPSM to do the right thing */
+    SDIO_DTIMER = 0xffffffff; // wait forever
+    SDIO_DLEN = 64; // 64 bytes
+    // Block size 64 | from card to CPU | enable
+    SDIO_DCTRL = 0x60 | 0x2 | 0x1;
+    DEBUG("Send Command to get Status\n");
+    err = sdio_sendcommand(13, SDIO_Q | SDIO_SHORT_RESPONSE, 0);
+    ndx = 0;
+    if (! err) {
+        do {
+            tmp_reg = SDIO_STA;
+            if (tmp_reg & SDIO_STA_RXDAVL) {
+                buf[ndx++] = SDIO_FIFO;
+            }
+        } while ((tmp_reg & SDIO_STA_RXACT) && (ndx < 32));
+        debug_status(tmp_reg);
+    }
+    DEBUG("Status data returned was:\n");
+    for (i = 0; i < ndx; i++) {
+        uart_puts(debug_console, "    ");
+        uart_putnum(debug_console, FMT_BASE_10, i);
+        byte_swap(buf[i]);
+        uart_puts(debug_console, ": ");
+        uart_putnum(debug_console, FMT_HEX_LONG | FMT_ALTERNATE_FORM, buf[i]);
+        uart_puts(debug_console, "\n");
+    }
+    DEBUG("End of status data.\n");
+    sd_select(0);
+    debug_sdio_sdstatus(buf);
+    return 0;
+}
+#endif
 
 /*
  * Dump out the SD Card status into the debug console
