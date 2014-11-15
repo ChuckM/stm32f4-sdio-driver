@@ -17,7 +17,7 @@ enum SDIO_POWER_STATE {
     SDIO_POWER_OFF
 };
 
-#define SDIO_CARD_CCS(c)     (((c)->ocr & 0x20000000) != 0)
+#define SDIO_CARD_CCS(c)     (((c)->ocr & 0x40000000) != 0)
 #define SDIO_CARD_UHS2(c)   (((c)->ocr & 0x40000000) != 0)
 #define SDIO_CARD_LVOK(c)   (((c)->ocr & 0x01000000) != 0)
 
