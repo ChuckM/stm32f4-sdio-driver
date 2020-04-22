@@ -56,7 +56,7 @@ static void
 systick_setup(int tick_rate) {
     /* clock rate / 1000 to get 1mS interrupt rate */
     systick_set_reload((168000000) / tick_rate);
-    STK_CTRL = 0x07;
+    STK_CSR = 0x07;
 #if 0
     /* libopencm3 bug, the above assign does all three of these
      * steps, but systick_set_clocksource fails to set the clock
@@ -72,7 +72,7 @@ systick_setup(int tick_rate) {
 void
 clock_init(int systick_rate)
 {
-	rcc_clock_setup_hse_3v3(&hse_8mhz_3v3[CLOCK_3V3_168MHZ]);
+       rcc_clock_setup_pll(&rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_168MHZ]);
 #ifdef SYSTICK_HEARTBEAT
 	rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_IOPDEN);
 	gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO15);
