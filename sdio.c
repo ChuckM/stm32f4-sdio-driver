@@ -73,7 +73,7 @@
  * used by the SCR code.
  */
 #define byte_swap(val) \
-        asm("rev %[swap], %[swap]" : [swap] "=r" (val) : "0" (val));
+        __asm__("rev %[swap], %[swap]" : [swap] "=r" (val) : "0" (val));
 
 /*
  * sdio_bus
@@ -142,6 +142,8 @@ sdio_init(void)
 #ifdef WITH_DMA2
     rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_DMA2EN);
 #endif
+    rcc_periph_clock_enable(RCC_GPIOC);
+    rcc_periph_clock_enable(RCC_GPIOD);
 
 	gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO12 | GPIO15);
 
@@ -366,7 +368,7 @@ sdio_command(uint32_t cmd, uint32_t arg)
     int         error = 0;
 
     tmp_val = SDIO_CMD & ~0x7ff;            // Read pre-existing state
-    tmp_val |= (cmd & SDIO_CMD_CMDINDEX_MSK);   // Put the Command in
+    tmp_val |= (cmd & SDIO_CMD_CMDINDEX_MASK);   // Put the Command in
     tmp_val |= SDIO_CMD_CPSMEN;                 // We'll be running CPSM
 
     switch(cmd) {
