@@ -44,6 +44,40 @@
  */
 #define SDIO_LOGGING
 
+/* The input-output buffers */
+static volatile uint32_t *recv_buf;
+static volatile uint32_t *xmit_buf;
+static volatile uint16_t txCount;
+static volatile uint16_t rxCount;
+static volatile uint8_t sdio_in_progress;
+
+void
+sdio_isr() {
+    while( (SDIO_STA & SDIO_STA_RXDAVL) && rxCount > 0) {
+        *recv_buf++ = SDIO_FIFO;
+        if( --rxCount == 0 ) {
+            SDIO_MASK &= ~SDIO_MASK_RXDAVLIE;  // Can't receive anymore because the buffer is full
+            recv_buf = 0;
+            break;
+        }
+    }
+
+    while( !(SDIO_STA & SDIO_STA_TXFIFOF) && txCount > 0) {
+        SDIO_FIFO = *xmit_buf++;
+        if(--txCount == 0) {
+            SDIO_MASK &= ~SDIO_MASK_TXFIFOHEIE;     // nothing to send, disabling TX interrupts
+            break;
+        }
+    }
+
+    if( SDIO_STA & SDIO_STA_DATAEND ) {
+        SDIO_ICR |= SDIO_ICR_DATAENDC;
+        SDIO_MASK &= ~SDIO_MASK_DATAENDIE;
+        sdio_in_progress = false;  // signal to the main task
+                                   // should use vTaskNotifyGiveFromISR instead to do it efficiently
+    }
+}
+
 /*
  * The Embest board ties PB15 to 'card detect' which is useful
  * for aborting early, and detecting card swap. Needs porting
@@ -179,6 +213,11 @@ sdio_init(void)
     /*     PB15 as a hacked Card Detect (active LOW for card present) */
     gpio_mode_setup(GPIOB, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO15);
 #endif
+
+    nvic_enable_irq(NVIC_SDIO_IRQ);
+
+    txCount = rxCount = 0;
+    recv_buf = xmit_buf = NULL;
 }
 
 /*
@@ -542,8 +581,6 @@ sdio_readblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
     int err;
     uint32_t tmp_reg;
     uint32_t addr = lba;
-    uint8_t *t;
-    int ndx;
 
     if (! SDIO_CARD_CCS(c)) {
         addr = lba * 512; // non HC cards use byte address
@@ -559,16 +596,12 @@ sdio_readblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
                          SDIO_DCTRL_DTEN;
             err = sdio_command(17, addr);
             if (! err) {
-                data_len = 0;
-                do {
-                    tmp_reg = SDIO_STA;
-                    if (tmp_reg & SDIO_STA_RXDAVL) {
-                        data_buf[data_len] = SDIO_FIFO;
-                        if (data_len < 128) {
-                            ++data_len;
-                        }
-                    }
-                } while (tmp_reg & SDIO_STA_RXACT);
+                recv_buf = (uint32_t *)buf;
+                rxCount = 512 / 4;  // Count in 32-bit words
+                sdio_in_progress = true;
+                SDIO_MASK |= SDIO_MASK_RXDAVLIE | SDIO_MASK_DATAENDIE;
+                while(sdio_in_progress);  // this flag will be cleared by the isr
+                tmp_reg = SDIO_STA;
                 if ((tmp_reg & SDIO_STA_DBCKEND) == 0) {
                     if (tmp_reg & SDIO_STA_DCRCFAIL) {
                         err = SDIO_EDCRCFAIL;
@@ -576,22 +609,6 @@ sdio_readblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
                         err = SDIO_ERXOVERR;
                     } else {
                         err = SDIO_EUNKNOWN; // Unknown Error!
-                    }
-                } else {
-                    /* Data received, byte swap and put in user
-                     * supplied buffer.
-                     */
-#if 0
-                    for (ndx = 0; ndx < data_len; ndx++) {
-                        byte_swap(data_buf[ndx]);
-                    }
-#endif
-                    t = (uint8_t *)(data_buf);
-                    /* copy out to the user buffer */
-                    for (ndx = 0; ndx < 512; ndx ++) {
-                        *buf = *t;
-                        buf++;
-                        t++;
                     }
                 }
             }
@@ -610,25 +627,11 @@ sdio_writeblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
     int err;
     uint32_t tmp_reg;
     uint32_t addr = lba;
-    uint8_t *t;
-    int ndx;
 
     if (! SDIO_CARD_CCS(c)) {
         addr = lba * 512; // non HC cards use byte address
     }
     
-    /*
-     * Copy buffer to our word aligned buffer. Nominally you
-     * can just use the passed in buffer and cast it to a
-     * uint32_t * but that can cause issues if it isn't 
-     * aligned.
-     */
-    t = (uint8_t *)(data_buf);
-    for (ndx = 0; ndx < 512; ndx ++) {
-        *t = *buf;
-        buf++;
-        t++;
-    }
     err = sdio_select(c->rca);
     if (! err) {
         /* Set Block Size to 512 */
@@ -640,16 +643,12 @@ sdio_writeblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
                          SDIO_DCTRL_DTEN;
             err = sdio_command(24, addr);
             if (! err) {
-                data_len = 0;
-                do {
-                    tmp_reg = SDIO_STA;
-                    if (tmp_reg & SDIO_STA_TXFIFOHE) {
-                        SDIO_FIFO = data_buf[data_len];
-                        if (data_len < 128) {
-                            ++data_len;
-                        }
-                    }
-                } while (tmp_reg & SDIO_STA_TXACT);
+                txCount = 512/4;  // Count in 32-bit words
+                xmit_buf = (uint32_t *)buf;
+                sdio_in_progress = true;
+                SDIO_MASK |= SDIO_MASK_TXFIFOHEIE | SDIO_MASK_DATAENDIE;
+                while(sdio_in_progress);   // this flag will be cleared by the isr
+                tmp_reg = SDIO_STA;
                 if ((tmp_reg & SDIO_STA_DBCKEND) == 0) {
                     if (tmp_reg & SDIO_STA_DCRCFAIL) {
                         err = SDIO_EDCRCFAIL;
