@@ -279,6 +279,8 @@ show_sdio_response(int row, int col) {
 #define RESP1_AKE_SEQ_ERROR            ((uint32_t)0x00000008)
 #define RESP1_ALL_ERRORS               ((uint32_t)0xFDFFE008)
 
+#if 0
+
 static const struct {
     uint32_t bit;   // error bit in R1 Register
     char    *msg;   // Text version of error
@@ -305,7 +307,6 @@ static const struct {
         { 0, 0},   // must be last
 };
 
-#if 0
 
 /*
  * Return an appropriate error message based on an R1 response
