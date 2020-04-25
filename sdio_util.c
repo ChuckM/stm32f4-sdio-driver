@@ -31,6 +31,7 @@ void show_sdio_status(int, int);
 void show_sdio_sdstatus(int, int);
 void debug_sdio_sdstatus(uint32_t buf[]);
 void show_sdio_cid(int, int, uint32_t []);
+void show_sdio_ocr(int, int, uint32_t);
 void show_sdio_csd(int, int, uint32_t []);
 void show_sdio_power(int row, int col);
 void show_sdio_carddetect(int row, int col);
@@ -426,11 +427,11 @@ sdio_explorer(void) {
     show_sdio_power(1, 40);
     show_sdio_carddetect(2, 40);
     show_sdio_clock(1, 1);
-#if 0
+
     show_sdio_csd(17, 1, my_card->csd);
     show_sdio_cid(3, 32, my_card->cid);
+    show_sdio_ocr(10, 40, my_card->ocr);
     show_sdio_scr(32, 42, my_card->scr[0]);
-#endif
 
     move_cursor(console, 10, 1);
     text_color(console, YELLOW);
@@ -442,12 +443,12 @@ sdio_explorer(void) {
         move_cursor(console, 11, 1);
         uart_puts(console, "[R]ead, [W]rite, or e[X]it:        ");
         move_cursor(console, 11, 29);
-        c = uart_getc(console, 1);
-        if ((c == 'x') || (c == 'X')) {
+        c = uart_getc(console, 1) | 0x20; // force lowercase
+        if (c == 'x') {
             uart_puts(console, "Exit");
             return;
         }
-        if ((c == 'r') || (c == 'R')) {
+        if (c == 'r') {
             uart_puts(console, "Read");
             move_cursor(console, 12, 1);
             uart_puts(console, "Enter Block # :               ");
@@ -465,7 +466,7 @@ sdio_explorer(void) {
             move_cursor(console, 15, 1);
             addr = dump_page(console, blk_read_buf, blk_read_buf);
             dump_page(console, addr, blk_read_buf);
-        } else if ((c == 'w') || (c == 'W')) {
+        } else if (c == 'w') {
             uart_puts(console, "Write");
             move_cursor(console, 12, 1);
             uart_puts(console, "Enter Block # :               ");
@@ -487,6 +488,19 @@ sdio_explorer(void) {
             uart_puts(console, sdio_errmsg(err));
         }
     }
+}
+
+/*
+ * Put up the SD Card's CID data
+ */
+void
+show_sdio_ocr(int row, int col, uint32_t ocr) {
+    move_cursor(console, row, col);
+    text_color(console, YELLOW);
+    uart_puts(console, "OCR Capacity: ");
+    move_cursor(console, row, col+14);
+    text_color(console, DEFAULT);
+    uart_puts(console, ocr&(1<<30) ? "SDHC or SDXC" : "SDSC");
 }
 
 /*
@@ -963,7 +977,7 @@ show_sdio_scr(int row, int col, uint32_t scr) {
     move_cursor(console, row+2, col+13);
     uart_puts(console, "SPEC Version: ");
     text_color(console, GREEN);
-    uart_putnum(console, SD_SCR_SPEC(s), FMT_BASE_10);
+    uart_putnum(console, FMT_BASE_10, SD_SCR_SPEC(s));
     text_color(console, YELLOW);
     move_cursor(console, row+3, col+9);
     uart_puts(console, "Data After Erase: ");
@@ -1070,6 +1084,8 @@ debug_sdio_sdstatus(uint32_t buf[]) {
         case 2: DEBUG("Class 4\n");
                 break;
         case 3: DEBUG("Class 6\n");
+                break;
+        case 4: DEBUG("Class 10\n");
                 break;
         default:
                 DEBUG("Reserved\n");
