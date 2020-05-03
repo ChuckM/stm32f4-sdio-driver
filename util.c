@@ -71,9 +71,9 @@ stime(uint32_t t) {
  * So ideally it should return a 'what happened' not a 
  * number, so we'll change it to that.
  */
+#if 0
 enum EDIT_EVENT 
 edit_number(int chan, int row, int col, uint32_t *orig, int base, int size) {
-#if 0
     XXX Fix this 
     int cursor = 0;
     char buf[33];
@@ -111,6 +111,6 @@ edit_number(int chan, int row, int col, uint32_t *orig, int base, int size) {
             cursor = (cursor + 1) % width;
         }
     }
-#endif
     return EDIT_ACCEPT;
 }
+#endif
