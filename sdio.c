@@ -48,10 +48,6 @@
 #define SDIO_LOGGING
 
 /* The input-output buffers */
-static volatile uint32_t *recv_buf;
-static volatile uint32_t *xmit_buf;
-static volatile uint16_t txCount;
-static volatile uint16_t rxCount;
 static TaskHandle_t xTaskToNotify = 0;
 static int selected_rca = 0;
 
@@ -222,8 +218,6 @@ sdio_init(void)
     nvic_set_priority(NVIC_SDIO_IRQ, 11<<4);
     nvic_enable_irq(NVIC_SDIO_IRQ);
 
-    txCount = rxCount = 0;
-    recv_buf = xmit_buf = NULL;
     selected_rca = 0;
     xTaskToNotify = xTaskGetCurrentTaskHandle();
     xTaskNotifyGive( xTaskToNotify ); // SDIO is available
