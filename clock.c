@@ -15,6 +15,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+void vApplicationTickHook(void);
+
 /*
  * Comment this #define out if you don't want the BLUE led on
  * the board blinking at 2Hz
@@ -49,7 +51,7 @@ uint32_t mtime() {
 
 /* Set STM32 to 168 MHz. */
 void
-clock_init(int systick_rate)
+clock_init(void)
 {
        rcc_clock_setup_pll(&rcc_hse_8mhz_3v3[RCC_CLOCK_3V3_168MHZ]);
 #ifdef SYSTICK_HEARTBEAT

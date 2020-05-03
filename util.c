@@ -27,7 +27,7 @@
  */
 void
 bb_setup(int32_t baud) {
-    clock_init(1000);
+    clock_init();
     console = uart_init(PC6, PC7, baud);
     sdio_init();
 }
