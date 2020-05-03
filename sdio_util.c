@@ -31,6 +31,7 @@ void show_sdio_status(int, int);
 void show_sdio_sdstatus(int, int);
 void debug_sdio_sdstatus(uint32_t buf[]);
 void show_sdio_cid(int, int, uint32_t []);
+void show_sdio_ocr(int, int, uint32_t);
 void show_sdio_csd(int, int, uint32_t []);
 void show_sdio_power(int row, int col);
 void show_sdio_carddetect(int row, int col);
@@ -42,6 +43,8 @@ void debug_status(uint32_t);
 static void en_dis(char *, uint32_t, char *, char *);
 void sdio_log(uint8_t cmd, uint32_t arg, int err, const char *resp);
 int sd_getsdstatus(int rca);
+void fill_buffer( uint8_t *buf, uint32_t block_num );
+bool verify_buffer( uint8_t *buf, uint32_t block_num );
 
 char debug_buf[64];
 
@@ -99,7 +102,7 @@ en_dis(char *tag, uint32_t bits, char *en, char *ds) {
 }
 
 
-uint8_t blk_read_buf[512];
+uint8_t blk_read_buf[1024];
 
 
 /*
@@ -279,6 +282,8 @@ show_sdio_response(int row, int col) {
 #define RESP1_AKE_SEQ_ERROR            ((uint32_t)0x00000008)
 #define RESP1_ALL_ERRORS               ((uint32_t)0xFDFFE008)
 
+#if 0
+
 static const struct {
     uint32_t bit;   // error bit in R1 Register
     char    *msg;   // Text version of error
@@ -305,7 +310,6 @@ static const struct {
         { 0, 0},   // must be last
 };
 
-#if 0
 
 /*
  * Return an appropriate error message based on an R1 response
@@ -374,6 +378,21 @@ uint8_t blk_write_buf[512];
 
 SDIO_CARD my_card;
 
+void fill_buffer( uint8_t *buf, uint32_t block_num ) {
+    uint32_t *ptr = (uint32_t *)buf;
+    block_num <<= 8;
+    for( int i=0; i<128; i++ )
+        *ptr++ = (uint32_t)(block_num++ * 123.45 / 5);  // Simulating hard work to calculate the new block
+}
+
+bool verify_buffer( uint8_t *buf, uint32_t block_num ) {
+    uint32_t *ptr = (uint32_t *)buf;
+    block_num <<= 8;
+    for( int i=0; i<128; i++ )
+        if( *ptr++ != (uint32_t)(block_num++  * 123.45 / 5))
+            return false;
+    return true;
+}
 
 /*
  * SDIO Explorer
@@ -425,11 +444,11 @@ sdio_explorer(void) {
     show_sdio_power(1, 40);
     show_sdio_carddetect(2, 40);
     show_sdio_clock(1, 1);
-#if 0
+
     show_sdio_csd(17, 1, my_card->csd);
     show_sdio_cid(3, 32, my_card->cid);
+    show_sdio_ocr(10, 40, my_card->ocr);
     show_sdio_scr(32, 42, my_card->scr[0]);
-#endif
 
     move_cursor(console, 10, 1);
     text_color(console, YELLOW);
@@ -439,14 +458,14 @@ sdio_explorer(void) {
     uart_puts(console, " blocks.");
     while (1) {
         move_cursor(console, 11, 1);
-        uart_puts(console, "[R]ead, [W]rite, or e[X]it:        ");
-        move_cursor(console, 11, 29);
-        c = uart_getc(console, 1);
-        if ((c == 'x') || (c == 'X')) {
+        uart_puts(console, "[R]ead, [W]rite, [S]peed test, or e[X]it:        ");
+        move_cursor(console, 11, 43);
+        c = uart_getc(console, 1) | 0x20; // force lowercase
+        if (c == 'x') {
             uart_puts(console, "Exit");
             return;
         }
-        if ((c == 'r') || (c == 'R')) {
+        if (c == 'r') {
             uart_puts(console, "Read");
             move_cursor(console, 12, 1);
             uart_puts(console, "Enter Block # :               ");
@@ -464,7 +483,7 @@ sdio_explorer(void) {
             move_cursor(console, 15, 1);
             addr = dump_page(console, blk_read_buf, blk_read_buf);
             dump_page(console, addr, blk_read_buf);
-        } else if ((c == 'w') || (c == 'W')) {
+        } else if (c == 'w') {
             uart_puts(console, "Write");
             move_cursor(console, 12, 1);
             uart_puts(console, "Enter Block # :               ");
@@ -484,8 +503,96 @@ sdio_explorer(void) {
             move_cursor(console, 13, 1);
             uart_puts(console, "Result : ");
             uart_puts(console, sdio_errmsg(err));
+        } else if (c == 's') {
+            uart_puts(console, "Speed test");
+            move_cursor(console, 12, 1);
+            uart_puts(console, "Enter Block # :               ");
+            move_cursor(console, 12, 17);
+            blk = uart_getnum(console);
+
+            move_cursor(console, 13, 1);
+            uart_puts(console, "Enter number of blocks :               ");
+            move_cursor(console, 13, 26);
+            uint32_t num_blocks = uart_getnum(console);
+            move_cursor(console, 14, 1);
+            uint32_t b, rspeed[2], wspeed[2];
+            for( int k = 0; k < 2; k++ )
+            {
+                uint32_t end_time, start_time;
+                start_time = mtime();
+                uint8_t buf_selector = 1;
+                err = 0;
+                for (b=0; b < num_blocks && !err; b++) {
+                    buf_selector = 1 - buf_selector;
+                    uint8_t *cur_buf = blk_read_buf + buf_selector * 512;
+                    fill_buffer( cur_buf, blk+b );
+                    err = sdio_writeblock_dma(my_card, blk+b, cur_buf, k > 0);
+                }
+                if( err )
+                    break;
+
+                if( k == 0 && (err = sdio_wait_for_completion()) )
+                    break;
+                end_time = mtime();
+                wspeed[k] = num_blocks * 512 / (end_time - start_time);
+            
+                start_time = mtime();
+                uint8_t *cur_buf = blk_read_buf;
+                if( (err = sdio_readblock_dma(my_card, blk, cur_buf, k > 0)) )
+                    break;
+                buf_selector = 0;
+                for (b=1; b < num_blocks && !err; b++) {
+                    buf_selector = 1 - buf_selector;
+                    uint8_t *prev_buf = cur_buf;
+                    cur_buf = blk_read_buf + buf_selector * 512;
+                    if( (err = sdio_readblock_dma(my_card, blk+b, cur_buf, k > 0)) )
+                        break;
+                    else if( !verify_buffer( prev_buf, blk+b-1 ) )
+                    {
+                        uart_puts(console, "Validation ");
+                        err = 1;
+                        break;
+                    }
+                }
+                if( err )
+                    break;
+
+                if( k == 0 && (err = sdio_wait_for_completion()) )
+                    break;
+                end_time = mtime();
+                rspeed[k] = num_blocks * 512 / (end_time - start_time);
+            }
+            if( err )
+            {
+                uart_puts(console, "Error : ");
+                uart_puts(console, sdio_errmsg(err) );
+                break;
+            } else {
+                uart_puts(console, "Result : write:");
+                uart_putnum(console, FMT_BASE_10, wspeed[0]);
+                uart_puts(console, "/");
+                uart_putnum(console, FMT_BASE_10, wspeed[1]);
+                uart_puts(console, " vs read: ");
+                uart_putnum(console, FMT_BASE_10, rspeed[0]);
+                uart_puts(console, "/");
+                uart_putnum(console, FMT_BASE_10, rspeed[1]);
+                uart_puts(console, " KByte/sec                  ");
+            }
         }
     }
+}
+
+/*
+ * Put up the SD Card's CID data
+ */
+void
+show_sdio_ocr(int row, int col, uint32_t ocr) {
+    move_cursor(console, row, col);
+    text_color(console, YELLOW);
+    uart_puts(console, "OCR Capacity: ");
+    move_cursor(console, row, col+14);
+    text_color(console, DEFAULT);
+    uart_puts(console, ocr&(1<<30) ? "SDHC or SDXC" : "SDSC");
 }
 
 /*
@@ -962,7 +1069,7 @@ show_sdio_scr(int row, int col, uint32_t scr) {
     move_cursor(console, row+2, col+13);
     uart_puts(console, "SPEC Version: ");
     text_color(console, GREEN);
-    uart_putnum(console, SD_SCR_SPEC(s), FMT_BASE_10);
+    uart_putnum(console, FMT_BASE_10, SD_SCR_SPEC(s));
     text_color(console, YELLOW);
     move_cursor(console, row+3, col+9);
     uart_puts(console, "Data After Erase: ");
@@ -1069,6 +1176,8 @@ debug_sdio_sdstatus(uint32_t buf[]) {
         case 2: DEBUG("Class 4\n");
                 break;
         case 3: DEBUG("Class 6\n");
+                break;
+        case 4: DEBUG("Class 10\n");
                 break;
         default:
                 DEBUG("Reserved\n");

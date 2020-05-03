@@ -19,12 +19,15 @@
 #include <libopencm3/stm32/sdio.h>
 #include <libopencm3/stm32/gpio.h>
 #include <libopencm3/stm32/rcc.h>
+#include <libopencm3/stm32/dma.h>
 #include <libopencm3/cm3/nvic.h>
 #include "term.h"
 #include "uart.h"
 #include "sdio.h"
 #include "debug.h"
 #include "clock.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 /*
  * Some Global defines, collected here.
@@ -43,6 +46,22 @@
  * index into the log.  Default size is 10 entries (see below)
  */
 #define SDIO_LOGGING
+
+/* The input-output buffers */
+static TaskHandle_t xTaskToNotify = 0;
+static int selected_rca = 0;
+
+void
+sdio_isr() {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if( SDIO_STA & SDIO_STA_DBCKEND ) {
+        SDIO_ICR |= SDIO_ICR_DATAENDC | SDIO_ICR_DBCKENDC;
+        SDIO_MASK &= ~(SDIO_MASK_DATAENDIE | SDIO_MASK_DBCKENDIE);
+        if( xTaskToNotify )
+            vTaskNotifyGiveFromISR( xTaskToNotify, &xHigherPriorityTaskWoken );
+    }
+    portYIELD_FROM_ISR( xHigherPriorityTaskWoken );
+}
 
 /*
  * The Embest board ties PB15 to 'card detect' which is useful
@@ -73,7 +92,7 @@
  * used by the SCR code.
  */
 #define byte_swap(val) \
-        asm("rev %[swap], %[swap]" : [swap] "=r" (val) : "0" (val));
+        __asm__("rev %[swap], %[swap]" : [swap] "=r" (val) : "0" (val));
 
 /*
  * sdio_bus
@@ -128,6 +147,24 @@ sdio_bus(int bits, enum SDIO_CLOCK_DIV freq) {
     return 0;
 }
 
+static void dma_init(void)
+{
+    /* SDIO uses DMA controller 2 Stream 3 or 6 Channel 4. */
+    rcc_periph_clock_enable(RCC_DMA2);
+    dma_stream_reset(DMA2, DMA_STREAM3);
+    dma_set_priority(DMA2, DMA_STREAM3, DMA_SxCR_PL_LOW);
+    dma_set_memory_size(DMA2, DMA_STREAM3, DMA_SxCR_MSIZE_32BIT);
+    dma_set_peripheral_size(DMA2, DMA_STREAM3, DMA_SxCR_PSIZE_32BIT);
+    dma_enable_memory_increment_mode(DMA2, DMA_STREAM3);
+    dma_set_peripheral_flow_control(DMA2, DMA_STREAM3);
+    dma_set_peripheral_burst(DMA2, DMA_STREAM3, DMA_SxCR_PBURST_INCR4);
+    dma_set_memory_burst(DMA2, DMA_STREAM3, DMA_SxCR_MBURST_INCR4);
+    dma_enable_fifo_mode(DMA2, DMA_STREAM3);
+    dma_set_fifo_threshold(DMA2, DMA_STREAM3, DMA_SxFCR_FTH_4_4_FULL);
+    dma_set_peripheral_address(DMA2, DMA_STREAM3, (uint32_t) &SDIO_FIFO);
+    dma_channel_select(DMA2, DMA_STREAM3, DMA_SxCR_CHSEL_4);
+}
+
 /*
  * Set up the GPIO pins and peripheral clocks for the SDIO
  * system. The code should probably take an option card detect
@@ -137,11 +174,11 @@ void
 sdio_init(void)
 {
     /* Enable clocks for SDIO and DMA2 */
-	rcc_peripheral_enable_clock(&RCC_APB2ENR, RCC_APB2ENR_SDIOEN);
+    dma_init();
+    rcc_periph_clock_enable(RCC_SDIO);
 
-#ifdef WITH_DMA2
-    rcc_peripheral_enable_clock(&RCC_AHB1ENR, RCC_AHB1ENR_DMA2EN);
-#endif
+    rcc_periph_clock_enable(RCC_GPIOC);
+    rcc_periph_clock_enable(RCC_GPIOD);
 
 	gpio_mode_setup(GPIOD, GPIO_MODE_OUTPUT, GPIO_PUPD_NONE, GPIO12 | GPIO15);
 
@@ -177,6 +214,13 @@ sdio_init(void)
     /*     PB15 as a hacked Card Detect (active LOW for card present) */
     gpio_mode_setup(GPIOB, GPIO_MODE_INPUT, GPIO_PUPD_PULLUP, GPIO15);
 #endif
+
+    nvic_set_priority(NVIC_SDIO_IRQ, 11<<4);
+    nvic_enable_irq(NVIC_SDIO_IRQ);
+
+    selected_rca = 0;
+    xTaskToNotify = xTaskGetCurrentTaskHandle();
+    xTaskNotifyGive( xTaskToNotify ); // SDIO is available
 }
 
 /*
@@ -366,7 +410,7 @@ sdio_command(uint32_t cmd, uint32_t arg)
     int         error = 0;
 
     tmp_val = SDIO_CMD & ~0x7ff;            // Read pre-existing state
-    tmp_val |= (cmd & SDIO_CMD_CMDINDEX_MSK);   // Put the Command in
+    tmp_val |= (cmd & SDIO_CMD_CMDINDEX_MASK);   // Put the Command in
     tmp_val |= SDIO_CMD_CPSMEN;                 // We'll be running CPSM
 
     switch(cmd) {
@@ -450,11 +494,14 @@ static int data_len;
  */
 static int
 sdio_select(int rca) {
-    int err;
+    int err=0;
 
-    err = sdio_command(7, rca << 16);
-    if ((rca == 0) && (err == SDIO_ECTIMEOUT)) {
-        return 0;   // "cheat" a timeout selecting 0 is a successful deselect
+    if( rca != selected_rca ) {
+        err = sdio_command(7, rca << 16);
+        selected_rca = rca;
+        if ((rca == 0) && (err == SDIO_ECTIMEOUT)) {
+            return 0;   // "cheat" a timeout selecting 0 is a successful deselect
+        }
     }
     return err;
 }
@@ -639,15 +686,19 @@ sdio_writeblock(SDIO_CARD c, uint32_t lba, uint8_t *buf) {
             err = sdio_command(24, addr);
             if (! err) {
                 data_len = 0;
-                do {
-                    tmp_reg = SDIO_STA;
-                    if (tmp_reg & SDIO_STA_TXFIFOHE) {
-                        SDIO_FIFO = data_buf[data_len];
-                        if (data_len < 128) {
-                            ++data_len;
-                        }
+                portDISABLE_INTERRUPTS();
+                while(data_len < 128)
+                    if (SDIO_STA & SDIO_STA_TXFIFOF)
+                        portENABLE_INTERRUPTS();
+                    else
+                    {
+                        portDISABLE_INTERRUPTS();
+                        SDIO_FIFO = data_buf[data_len++];
                     }
-                } while (tmp_reg & SDIO_STA_TXACT);
+
+                portENABLE_INTERRUPTS();
+                while (SDIO_STA & SDIO_STA_TXACT);
+                tmp_reg = SDIO_STA;
                 if ((tmp_reg & SDIO_STA_DBCKEND) == 0) {
                     if (tmp_reg & SDIO_STA_DCRCFAIL) {
                         err = SDIO_EDCRCFAIL;
@@ -878,4 +929,102 @@ sdio_print_log(int dev, int nrec) {
     uart_puts(dev, "Sorry Logging was not compiled in.\n");
     return;
 #endif
+}
+
+/*
+ * Read a Block from our card using interrupts
+ *
+ */
+int
+sdio_readblock_dma(SDIO_CARD c, uint32_t lba, uint8_t *buf, uint8_t wait) {
+    int err;
+    uint32_t addr = lba;
+
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY );
+    while( SDIO_STA & SDIO_STA_RXACT);
+
+    if (! SDIO_CARD_CCS(c)) {
+        addr = lba * 512; // non HC cards use byte address
+    }
+    if( (err = sdio_select(c->rca)) )
+        return err;
+    if( (err = sdio_command(16, 512)) )
+        return err;
+
+    dma_clear_interrupt_flags(DMA2, DMA_STREAM3, DMA_TCIF | DMA_HTIF | DMA_TEIF | DMA_DMEIF | DMA_FEIF);
+    dma_set_memory_address(DMA2, DMA_STREAM3, (uint32_t) buf);
+    dma_set_transfer_mode(DMA2, DMA_STREAM3, DMA_SxCR_DIR_PERIPHERAL_TO_MEM);
+    dma_enable_stream(DMA2, DMA_STREAM3);
+
+    SDIO_DTIMER = 0xffffffff;
+    SDIO_DLEN = 512;
+    SDIO_MASK |= SDIO_MASK_DBCKENDIE | SDIO_MASK_DATAENDIE | SDIO_MASK_RXOVERRIE | SDIO_MASK_DCRCFAILIE;
+    SDIO_DCTRL = SDIO_DCTRL_DBLOCKSIZE_9 | SDIO_DCTRL_DTDIR | SDIO_DCTRL_DMAEN | SDIO_DCTRL_DTEN;
+
+    if( (err = sdio_command(17, addr)) )
+        return err;
+    
+    if( wait )
+        return sdio_wait_for_completion();
+    return err;
+}
+
+/*
+ * Write a Block to our card using interrupts
+ */
+int
+sdio_writeblock_dma(SDIO_CARD c, uint32_t lba, uint8_t *buf, uint8_t wait) {
+    int err;
+    uint32_t addr = lba;
+
+    if (! SDIO_CARD_CCS(c)) {
+        addr = lba * 512; // non HC cards use byte address
+    }
+    
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY );
+    while( SDIO_STA & SDIO_STA_TXACT);
+    if( (err = sdio_select(c->rca)) )
+        return err;
+    /* Set Block Size to 512 */
+    if( (err = sdio_command(16, 512)) )
+        return err;
+
+    dma_clear_interrupt_flags(DMA2, DMA_STREAM3, DMA_TCIF | DMA_HTIF | DMA_TEIF | DMA_DMEIF | DMA_FEIF);
+    dma_set_memory_address(DMA2, DMA_STREAM3, (uint32_t) buf);
+    dma_set_transfer_mode(DMA2, DMA_STREAM3, DMA_SxCR_DIR_MEM_TO_PERIPHERAL);
+    dma_enable_stream(DMA2, DMA_STREAM3);
+
+    if( (err = sdio_command(24, addr)) )
+        return err;
+
+    SDIO_DTIMER = 0xffffffff;
+    SDIO_DLEN = 512;
+    SDIO_MASK |= SDIO_MASK_DBCKENDIE | SDIO_MASK_DATAENDIE | SDIO_MASK_TXUNDERRIE | SDIO_MASK_DCRCFAILIE;
+    SDIO_DCTRL = SDIO_DCTRL_DBLOCKSIZE_9 | SDIO_DCTRL_DTEN | SDIO_DCTRL_DMAEN;
+
+    if( wait )
+        return sdio_wait_for_completion();
+
+    return err;
+}
+
+int sdio_wait_for_completion() {
+    int err=0;
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY );
+    while( SDIO_STA & (SDIO_STA_TXACT|SDIO_STA_RXACT) );
+    uint32_t tmp_reg = SDIO_STA;
+    if (tmp_reg & SDIO_STA_DCRCFAIL) {
+        err = SDIO_EDCRCFAIL;
+    } else if (tmp_reg & SDIO_STA_TXUNDERR) {
+        err = SDIO_ETXUNDER;
+    } else if (tmp_reg & SDIO_STA_RXOVERR) {
+        err = SDIO_ERXOVERR;
+    } else if(tmp_reg) {
+        err = SDIO_EUNKNOWN; // Unknown Error!
+    }
+    SDIO_ICR = 0x7ff;           // Reset everything that isn't bolted down.
+    // deselect the card
+    (void) sdio_select(0);
+    xTaskNotifyGive( xTaskToNotify ); // SDIO is available
+    return err;
 }

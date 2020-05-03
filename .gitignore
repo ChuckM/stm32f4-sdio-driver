@@ -1,0 +1,6 @@
+*~
+*.[do]
+core
+.gdb_history
+*.elf
+*.map
