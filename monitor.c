@@ -25,6 +25,7 @@ int console = 0;
 const char *greet = "\nARM Baseboard Monitor v0.01\nEnter Command, ? or H for help.\n";
 
 void do_cmd(int);
+void taskMain(void *x);
 #define is_hex(c) ((((c) >= '0') && ((c) <= '9')) ||\
                    (((c) >= 'a') && ((c) <= 'f')) ||\
                    (((c) >= 'A') && ((c) <= 'F')))
@@ -55,6 +56,7 @@ char buf[256];
 void
 taskMain(void *x)
 {
+    (void)x;
     char c;
     uint8_t *addr;
 
