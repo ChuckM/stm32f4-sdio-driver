@@ -18,6 +18,8 @@
 #include "task.h"
 
 #if configCHECK_FOR_STACK_OVERFLOW
+void vApplicationStackOverflowHook(void);
+
 void
 vApplicationStackOverflowHook(void)
 {
