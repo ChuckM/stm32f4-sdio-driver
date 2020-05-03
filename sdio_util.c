@@ -43,6 +43,8 @@ void debug_status(uint32_t);
 static void en_dis(char *, uint32_t, char *, char *);
 void sdio_log(uint8_t cmd, uint32_t arg, int err, const char *resp);
 int sd_getsdstatus(int rca);
+void fill_buffer( uint8_t *buf, uint32_t block_num );
+bool verify_buffer( uint8_t *buf, uint32_t block_num );
 
 char debug_buf[64];
 
@@ -100,7 +102,7 @@ en_dis(char *tag, uint32_t bits, char *en, char *ds) {
 }
 
 
-uint8_t blk_read_buf[512];
+uint8_t blk_read_buf[1024];
 
 
 /*
@@ -376,6 +378,21 @@ uint8_t blk_write_buf[512];
 
 SDIO_CARD my_card;
 
+void fill_buffer( uint8_t *buf, uint32_t block_num ) {
+    uint32_t *ptr = (uint32_t *)buf;
+    block_num <<= 8;
+    for( int i=0; i<128; i++ )
+        *ptr++ = (uint32_t)(block_num++ * 123.45 / 5);  // Simulating hard work to calculate the new block
+}
+
+bool verify_buffer( uint8_t *buf, uint32_t block_num ) {
+    uint32_t *ptr = (uint32_t *)buf;
+    block_num <<= 8;
+    for( int i=0; i<128; i++ )
+        if( *ptr++ != (uint32_t)(block_num++  * 123.45 / 5))
+            return false;
+    return true;
+}
 
 /*
  * SDIO Explorer
@@ -441,8 +458,8 @@ sdio_explorer(void) {
     uart_puts(console, " blocks.");
     while (1) {
         move_cursor(console, 11, 1);
-        uart_puts(console, "[R]ead, [W]rite, or e[X]it:        ");
-        move_cursor(console, 11, 29);
+        uart_puts(console, "[R]ead, [W]rite, [S]peed test, or e[X]it:        ");
+        move_cursor(console, 11, 43);
         c = uart_getc(console, 1) | 0x20; // force lowercase
         if (c == 'x') {
             uart_puts(console, "Exit");
@@ -459,7 +476,7 @@ sdio_explorer(void) {
                 uart_puts(console, "Block number out of range!");
                 continue;
             }
-            err = sdio_readblock(my_card, blk, blk_read_buf);
+            err = sdio_readblock_intr(my_card, blk, blk_read_buf, true);
             move_cursor(console, 13, 1);
             uart_puts(console, "Result : ");
             uart_puts(console, sdio_errmsg(err));
@@ -482,10 +499,85 @@ sdio_explorer(void) {
                 ds++; ss++;
             }
             ntoa(blk, FMT_BASE_10, (char *) ds);
-            err = sdio_writeblock(my_card, blk, blk_read_buf);
+            err = sdio_writeblock_intr(my_card, blk, blk_read_buf, true);
             move_cursor(console, 13, 1);
             uart_puts(console, "Result : ");
             uart_puts(console, sdio_errmsg(err));
+        } else if (c == 's') {
+            uart_puts(console, "Speed test");
+            move_cursor(console, 12, 1);
+            uart_puts(console, "Enter Block # :               ");
+            move_cursor(console, 12, 17);
+            blk = uart_getnum(console);
+
+            move_cursor(console, 13, 1);
+            uart_puts(console, "Enter number of blocks :               ");
+            move_cursor(console, 13, 26);
+            uint32_t num_blocks = uart_getnum(console);
+            move_cursor(console, 14, 1);
+            uint32_t b, rspeed[2], wspeed[2];
+            for( int k = 0; k < 2; k++ )
+            {
+                uint32_t end_time, start_time;
+                start_time = mtime();
+                uint8_t buf_selector = 1;
+                err = 0;
+                for (b=0; b < num_blocks && !err; b++) {
+                    buf_selector = 1 - buf_selector;
+                    uint8_t *cur_buf = blk_read_buf + buf_selector * 512;
+                    fill_buffer( cur_buf, blk+b );
+                    err = sdio_writeblock_intr(my_card, blk+b, cur_buf, k > 0);
+                }
+                if( err )
+                    break;
+
+                if( k == 0 && (err = sdio_wait_for_completion()) )
+                    break;
+                end_time = mtime();
+                wspeed[k] = num_blocks * 512 / (end_time - start_time);
+            
+                start_time = mtime();
+                uint8_t *cur_buf = blk_read_buf;
+                if( (err = sdio_readblock_intr(my_card, blk, cur_buf, k > 0)) )
+                    break;
+                buf_selector = 0;
+                for (b=1; b < num_blocks && !err; b++) {
+                    buf_selector = 1 - buf_selector;
+                    uint8_t *prev_buf = cur_buf;
+                    cur_buf = blk_read_buf + buf_selector * 512;
+                    if( (err = sdio_readblock_intr(my_card, blk+b, cur_buf, k > 0)) )
+                        break;
+                    else if( !verify_buffer( prev_buf, blk+b-1 ) )
+                    {
+                        uart_puts(console, "Validation ");
+                        err = 1;
+                        break;
+                    }
+                }
+                if( err )
+                    break;
+
+                if( k == 0 && (err = sdio_wait_for_completion()) )
+                    break;
+                end_time = mtime();
+                rspeed[k] = num_blocks * 512 / (end_time - start_time);
+            }
+            if( err )
+            {
+                uart_puts(console, "Error : ");
+                uart_puts(console, sdio_errmsg(err) );
+                break;
+            } else {
+                uart_puts(console, "Result : write:");
+                uart_putnum(console, FMT_BASE_10, wspeed[0]);
+                uart_puts(console, "/");
+                uart_putnum(console, FMT_BASE_10, wspeed[1]);
+                uart_puts(console, " vs read: ");
+                uart_putnum(console, FMT_BASE_10, rspeed[0]);
+                uart_puts(console, "/");
+                uart_putnum(console, FMT_BASE_10, rspeed[1]);
+                uart_puts(console, " KByte/sec                  ");
+            }
         }
     }
 }
