@@ -14,6 +14,38 @@
 #include <libopencm3/stm32/usart.h>
 #include "uart.h"
 #include "debug.h"
+#include "FreeRTOS.h"
+#include "task.h"
+
+#if configCHECK_FOR_STACK_OVERFLOW
+void
+vApplicationStackOverflowHook(void)
+{
+    for (;;);
+}
+#endif
+
+void vAssertCalled(const char * const pcFileName, unsigned long ulLine)
+{
+    volatile unsigned long ulSetToNonZeroInDebuggerToContinue = 0;
+
+    /* Parameters are not used. */
+    (void) ulLine;
+    (void) pcFileName;
+
+    taskENTER_CRITICAL();
+    {
+        while (ulSetToNonZeroInDebuggerToContinue == 0) {
+            /* Use the debugger to set ulSetToNonZeroInDebuggerToContinue to a
+               non zero value to step out of this function to the point that raised
+               this assert(). */
+            __asm volatile( "NOP");
+            __asm volatile( "NOP");
+        }
+    }
+    taskEXIT_CRITICAL();
+}
+
 
 int debug_console;
 /*

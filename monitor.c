@@ -5,6 +5,9 @@
 
 #include <stdint.h>
 #include <libopencm3/stm32/sdio.h>
+#include <libopencm3/cm3/scb.h>
+#include "FreeRTOS.h"
+#include "task.h"
 #include "bb.h"
 #include "debug.h"
 
@@ -49,17 +52,11 @@ char buf[256];
      (((uint32_t) x >= 0x08000000) && ((uint32_t) x < 0x08100000)))
 
 #define MIN_ADDR (uint8_t *)(0x20000000)
-int
-main(void)
+void
+taskMain(void *x)
 {
     char c;
     uint8_t *addr;
-
-
-    // setup 115,200 baud
-    bb_setup(115200);
-    debug_init();
-    debug_puts("\nBBMON: Debug Channel\n");
 
     text_color(console, DEFAULT);
     clear_screen(console);
@@ -107,6 +104,21 @@ main(void)
             default:
                 uart_puts(console, "?\n");
         }
-	}
-	return 0;
+    }
 }
+
+int
+main(void)
+{
+    scb_set_priority_grouping(SCB_AIRCR_PRIGROUP_GROUP16_NOSUB);  // Required by FreeRTOS
+
+    // setup 115,200 baud
+    bb_setup(115200);
+    debug_init();
+    debug_puts("\nBBMON: Debug Channel\n");
+
+    xTaskCreate(taskMain,      "Main",        512, NULL, 1, NULL);
+    vTaskStartScheduler();
+    return 0;
+}
+

@@ -17,10 +17,12 @@
 ## along with this library.  If not, see <http://www.gnu.org/licenses/>.
 ##
 
-OBJS = util.o dump.o sdio.o sdio_util.o debug.o uart.o clock.o term.o
+OBJS = util.o dump.o sdio.o sdio_util.o debug.o uart.o clock.o term.o rtos/heap_4.o rtos/list.o rtos/port.o rtos/tasks.o
 BINARY = monitor
 
 LDSCRIPT = ../stm32f4-discovery.ld
+TGT_CFLAGS	+= -I./rtos -I.
+TGT_CXXFLAGS	+= -I./rtos -I.
 
 include ../../Makefile.include
 
