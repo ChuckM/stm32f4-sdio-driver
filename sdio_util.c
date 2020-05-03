@@ -476,7 +476,7 @@ sdio_explorer(void) {
                 uart_puts(console, "Block number out of range!");
                 continue;
             }
-            err = sdio_readblock_intr(my_card, blk, blk_read_buf, true);
+            err = sdio_readblock(my_card, blk, blk_read_buf);
             move_cursor(console, 13, 1);
             uart_puts(console, "Result : ");
             uart_puts(console, sdio_errmsg(err));
@@ -499,7 +499,7 @@ sdio_explorer(void) {
                 ds++; ss++;
             }
             ntoa(blk, FMT_BASE_10, (char *) ds);
-            err = sdio_writeblock_intr(my_card, blk, blk_read_buf, true);
+            err = sdio_writeblock(my_card, blk, blk_read_buf);
             move_cursor(console, 13, 1);
             uart_puts(console, "Result : ");
             uart_puts(console, sdio_errmsg(err));
@@ -526,7 +526,7 @@ sdio_explorer(void) {
                     buf_selector = 1 - buf_selector;
                     uint8_t *cur_buf = blk_read_buf + buf_selector * 512;
                     fill_buffer( cur_buf, blk+b );
-                    err = sdio_writeblock_intr(my_card, blk+b, cur_buf, k > 0);
+                    err = sdio_writeblock_dma(my_card, blk+b, cur_buf, k > 0);
                 }
                 if( err )
                     break;
@@ -538,14 +538,14 @@ sdio_explorer(void) {
             
                 start_time = mtime();
                 uint8_t *cur_buf = blk_read_buf;
-                if( (err = sdio_readblock_intr(my_card, blk, cur_buf, k > 0)) )
+                if( (err = sdio_readblock_dma(my_card, blk, cur_buf, k > 0)) )
                     break;
                 buf_selector = 0;
                 for (b=1; b < num_blocks && !err; b++) {
                     buf_selector = 1 - buf_selector;
                     uint8_t *prev_buf = cur_buf;
                     cur_buf = blk_read_buf + buf_selector * 512;
-                    if( (err = sdio_readblock_intr(my_card, blk+b, cur_buf, k > 0)) )
+                    if( (err = sdio_readblock_dma(my_card, blk+b, cur_buf, k > 0)) )
                         break;
                     else if( !verify_buffer( prev_buf, blk+b-1 ) )
                     {
